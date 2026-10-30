@@ -11,6 +11,10 @@ private final class FakeRuntime: RestartRuntime {
     var launchCount = 0
     var failEnumerationAfterSignal = false
     var displayReturns = true
+    var transientDisplayErrorsAfterLaunch = 0
+    var transientProcessErrorsAfterLaunch = 0
+    var displayReadsAfterLaunch = 0
+    var processReadsAfterLaunch = 0
     var executable = MacSystem.displayLinkExecutable
     let mode = DisplayMode(vendor: 3524, model: 19874, width: 2560, height: 1440,
                            pixelWidth: 2560, pixelHeight: 1440, refreshTenths: 600, builtIn: false)
@@ -19,10 +23,22 @@ private final class FakeRuntime: RestartRuntime {
         if failEnumerationAfterSignal && !signalled.isEmpty && launchCount == 0 {
             throw GuardError.message("process enumeration failed")
         }
+        if launchCount > 0 {
+            processReadsAfterLaunch += 1
+            if processReadsAfterLaunch <= transientProcessErrorsAfterLaunch {
+                throw GuardError.message("process enumeration temporarily unavailable")
+            }
+        }
         return running ? [ProcessEntry(pid: 200, uid: uid, ageSeconds: 1_000, executable: executable)] : []
     }
     func displays() throws -> [DisplayMode] {
-        signalled.isEmpty || displayReturns ? [mode] : []
+        if launchCount > 0 {
+            displayReadsAfterLaunch += 1
+            if displayReadsAfterLaunch <= transientDisplayErrorsAfterLaunch {
+                throw GuardError.message("Display is being reconfigured")
+            }
+        }
+        return signalled.isEmpty || displayReturns ? [mode] : []
     }
     func terminate(_ pid: Int32) throws { signalled.append(pid); running = false }
     func launch() throws { launchCount += 1; running = true }
@@ -49,6 +65,33 @@ final class RestartTests: XCTestCase {
         let system = FakeRuntime()
         let started = system.now
         system.displayReturns = false
+        XCTAssertEqual(try RestartEngine.run(pid: 200, runtime: system), "restarted_display_configuration_not_fully_restored")
+        XCTAssertEqual(system.now.timeIntervalSince(started), 90)
+        XCTAssertEqual(system.launchCount, 1)
+        XCTAssertEqual(system.signalled, [200])
+    }
+
+    func testTransientReconfigurationErrorsDoNotFailSuccessfulRestart() throws {
+        let system = FakeRuntime()
+        let started = system.now
+        system.transientDisplayErrorsAfterLaunch = 3
+        XCTAssertEqual(try RestartEngine.run(pid: 200, runtime: system), "restarted_displays_restored")
+        XCTAssertEqual(system.now.timeIntervalSince(started), 3)
+        XCTAssertEqual(system.launchCount, 1)
+        XCTAssertEqual(system.signalled, [200])
+    }
+
+    func testTransientProcessErrorsDuringRecoveryAreRetried() throws {
+        let system = FakeRuntime()
+        system.transientProcessErrorsAfterLaunch = 2
+        XCTAssertEqual(try RestartEngine.run(pid: 200, runtime: system), "restarted_displays_restored")
+        XCTAssertEqual(system.launchCount, 1)
+    }
+
+    func testPersistentReconfigurationErrorIsBoundedWithoutRestartLoop() throws {
+        let system = FakeRuntime()
+        let started = system.now
+        system.transientDisplayErrorsAfterLaunch = 1_000
         XCTAssertEqual(try RestartEngine.run(pid: 200, runtime: system), "restarted_display_configuration_not_fully_restored")
         XCTAssertEqual(system.now.timeIntervalSince(started), 90)
         XCTAssertEqual(system.launchCount, 1)

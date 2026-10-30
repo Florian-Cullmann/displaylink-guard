@@ -24,6 +24,7 @@ Der Installer baut das native Programm, installiert es nach `~/Library/Applicati
 - Neustarts erfolgen nur für die eigene aktive macOS-Anmeldung und bei einem externen Bildschirm.
 - Nur der vorher erneut überprüfte DisplayLink-Prozess des eigenen Benutzers erhält SIGTERM. WindowServer wird nicht beendet und DisplayLink nicht zwangsweise abgeschossen.
 - Nach dem Start wartet der Dienst bis zu 90 Sekunden auf die vorherigen aktiven Bildschirme mit denselben Auflösungen und Bildraten. Abweichungen werden protokolliert; Auflösungen werden nicht geändert.
+- Während der Wiederverbindung verarbeitet der Dienst macOS-Bildschirmmeldungen. Vorübergehend ungültige Bildschirm-Einträge werden innerhalb dieser Wartezeit erneut geprüft und brechen die Erfolgskontrolle nicht sofort ab.
 
 Der angeschlossene DisplayLink-Monitor wird beim Neustart vorübergehend schwarz und Fenster können sich verschieben. Die Wiederverbindung kann mehrere zehn Sekunden dauern. Die Zahl der Mach-Ports ist ein Indikator, kein Beweis für die Ursache eines Rucklers. Hohe Werte können nach einem Neustart bestehen bleiben; deshalb sind die Begrenzungen nötig. Dies ist ein Workaround für einen reproduzierbar durch DisplayLink-Neustart gebesserten Zustand.
 

@@ -1,3 +1,4 @@
+import CoreGraphics
 import Darwin
 import Foundation
 
@@ -12,7 +13,18 @@ public protocol RestartRuntime {
     func pause(_ seconds: Double)
 }
 
-struct NativeRestartRuntime: RestartRuntime {
+final class NativeRestartRuntime: RestartRuntime {
+    private let displayCallback: CGDisplayReconfigurationCallBack = { _, _, _ in }
+
+    init() throws {
+        let result = CGDisplayRegisterReconfigurationCallback(displayCallback, nil)
+        guard result == .success else {
+            throw GuardError.message("Cannot observe display reconfiguration: \(result.rawValue)")
+        }
+    }
+
+    deinit { CGDisplayRemoveReconfigurationCallback(displayCallback, nil) }
+
     var now: Date { Date() }
     var uid: UInt32 { getuid() }
     func isConsoleUser() -> Bool { MacSystem.isConsoleUser() }
@@ -22,7 +34,18 @@ struct NativeRestartRuntime: RestartRuntime {
         guard Darwin.kill(pid, SIGTERM) == 0 else { throw GuardError.message("Cannot terminate DisplayLink: \(errno)") }
     }
     func launch() throws { try MacSystem.reopenDisplayLink() }
-    func pause(_ seconds: Double) { Thread.sleep(forTimeInterval: seconds) }
+    func pause(_ seconds: Double) {
+        // CoreGraphics delivers display changes through the event-processing thread.
+        // Sleeping here can leave its display list holding the removed DisplayLink ID.
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if !RunLoop.current.run(mode: .default, before: deadline) {
+                let remaining = deadline.timeIntervalSinceNow
+                if remaining > 0 { Thread.sleep(forTimeInterval: remaining) }
+                break
+            }
+        }
+    }
 }
 
 public enum RestartEngine {
@@ -51,9 +74,14 @@ public enum RestartEngine {
         let expected = Dictionary(before.map { ($0, 1) }, uniquingKeysWith: +)
         let deadline = runtime.now.addingTimeInterval(90)
         repeat {
-            let agents = try runtime.processes().filter { $0.uid == runtime.uid && $0.executable == MacSystem.displayLinkExecutable }
-            let actual = Dictionary(try runtime.displays().map { ($0, 1) }, uniquingKeysWith: +)
-            if !agents.isEmpty && actual == expected { return "restarted_displays_restored" }
+            do {
+                let agents = try runtime.processes().filter { $0.uid == runtime.uid && $0.executable == MacSystem.displayLinkExecutable }
+                let actual = Dictionary(try runtime.displays().map { ($0, 1) }, uniquingKeysWith: +)
+                if !agents.isEmpty && actual == expected { return "restarted_displays_restored" }
+            } catch {
+                // An invalid/removed display ID is normal while the virtual screen reconnects.
+                // Keep observing until the existing deadline instead of reporting an immediate failure.
+            }
             runtime.pause(1)
         } while runtime.now < deadline
         return "restarted_display_configuration_not_fully_restored"
