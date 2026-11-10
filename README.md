@@ -8,6 +8,8 @@ This is a temporary workaround for growing helper memory usage, not a driver fix
 
 Use this if **DisplayLinkPrivilegedHelper** steadily consumes more memory on your Mac and restarting that helper releases it. This tool does not address leaks in `DisplayLinkUserAgent`, `CrashRestartHelper`, or other processes.
 
+The linked forum thread describes different affected processes: the original report concerns `DisplayLinkUserAgent` and `CrashRestartHelper`, while later reports concern `DisplayLinkPrivilegedHelper`. This guard targets the latter workaround only. Check the process name in Activity Monitor before installing; restarting the privileged helper is not evidence that memory retained by the other processes will be released.
+
 On October 20, 2026, [DisplayLink support acknowledged the reported issue](https://www.displaylink.org/forum/printthread.php?t=69953) and said a fix was expected in the next software update. **Last checked: November 10, 2026.** The [official download page](https://www.synaptics.com/products/displaylink-graphics/downloads/macos) still listed 17.0 as the latest release, and the thread did not confirm a shipped fix. This project is independent of Synaptics/DisplayLink.
 
 Check the official release notes before installing. Once an update fixes the leak on your Mac, uninstall the guard using the instructions below. There is no automatic driver-version check or update service.
@@ -15,7 +17,7 @@ Check the official release notes before installing. Once an update fixes the lea
 ## Requirements
 
 - macOS 13 or later is the build target. **Live-tested on macOS 27.0.1, Apple Silicon, DisplayLink Manager 17.0.24.** Other macOS/DisplayLink combinations are not hardware-validated.
-- **Swift 6.0 or newer**, supplied by a recent Xcode or Xcode Command Line Tools installation. Check with `swift --version`. Older Command Line Tools are not sufficient.
+- **For source builds only:** Swift 6.0 or newer, supplied by a recent Xcode or Xcode Command Line Tools installation. Check with `swift --version`. The packaged desktop app does not require developer tools.
 - DisplayLink Manager installed at `/Applications/DisplayLink Manager.app`, with its privileged helper running.
 - An active local login and administrator credentials for the one-time permission setup.
 
