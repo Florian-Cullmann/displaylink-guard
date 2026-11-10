@@ -25,11 +25,11 @@ The CI builds and runs simulated tests on macOS 15 for Apple Silicon and Intel. 
 
 ## Desktop app
 
-A native setup app is available in the source tree. It includes the compiled guard, displays current memory use, and provides **Enable protection**, **Refresh** and **Remove protection** buttons. Users of the packaged app do not need Swift, Xcode, Python or Terminal. Closing its window does not stop the installed monitor.
+[Download DisplayLink Guard for macOS](https://github.com/Florian-Cullmann/displaylink-guard/releases/download/v0.2.0/DisplayLink-Guard-0.2.0.dmg) — a universal app for Apple Silicon and Intel, Developer ID signed and notarized by Apple.
 
-Public download packages must be Developer ID signed and notarized by Apple. **The first signed download is being prepared; development builds are not intended for general installation.** Until a signed release is published, use the source installation below.
+The app includes the compiled guard, displays current memory use, and provides **Enable protection**, **Refresh** and **Remove protection** buttons. You do not need Swift, Xcode, Python or Terminal. Closing its window does not stop the installed monitor.
 
-The packaged installation flow is:
+To install:
 
 1. Open the downloaded DMG and drag **DisplayLink Guard** to **Applications**.
 2. Open the app and choose **Enable protection**.
