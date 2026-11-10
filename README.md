@@ -1,6 +1,6 @@
 # DisplayLink Guard
 
-Ein natives macOS-Hilfsprogramm gegen den Speicheranstieg des privilegierten DisplayLink-Helfers. Ein Benutzer-LaunchAgent misst **alle drei Stunden** dessen Speicher-Footprint (`top` → `MEM`, einschließlich komprimiertem Speicher). Ab **2048 MiB (2 GiB)** genügt eine Messung für einen Neustart. Es gibt **kein Tageslimit**.
+Ein natives macOS-Hilfsprogramm gegen den Speicheranstieg des privilegierten DisplayLink-Helfers. Ein Benutzer-LaunchAgent misst **alle 15 Minuten** dessen Speicher-Footprint (`top` → `MEM`, einschließlich komprimiertem Speicher). Ab **750 MiB** genügt eine Messung für einen Neustart. Es gibt **kein Tageslimit**.
 
 Neugestartet wird ausschließlich der Systemdienst `system/com.displaylink.DisplayLinkManager.PrivilegedHelper` mit `launchctl kickstart -k`. WindowServer und DisplayLinkUserAgent werden nicht beendet. Der Monitor kann beim Neustart kurz schwarz werden; Fenster können sich verschieben. Der zugrunde liegende DisplayLink-Fehler wird damit nicht behoben.
 
@@ -26,10 +26,10 @@ Das Programm wird nach `~/Library/Application Support/DisplayLinkGuard/` kopiert
 
 ## Verhalten
 
-- Prüfung beim Laden des LaunchAgents und danach alle 10800 Sekunden. Der Mac wird nicht geweckt; Schlaf kann Prüfungen verzögern.
-- Ein Messwert ab dem Grenzwert genügt. Zwischen Neustartversuchen liegen mindestens drei Stunden, auch nach Fehlern oder manuellen Aufrufen. Kein Tageslimit.
-- Fünf Minuten Schonzeit beim ersten Check bzw. neuem WindowServer; nach Messpausen über 4,5 Stunden oder rückwärts springender Uhr zwei Minuten. Ein während der Schonzeit übersprungener Check wird beim nächsten regulären Intervall wiederholt.
-- Der Helper muss mindestens 15 Minuten laufen. DisplayLink Manager muss im eigenen aktiven Benutzerkonto laufen und ein externer Bildschirm aktiv sein.
+- Prüfung beim Laden des LaunchAgents und danach alle 900 Sekunden. Der Mac wird nicht geweckt; Schlaf kann Prüfungen verzögern.
+- Ein Messwert ab dem Grenzwert genügt. Zwischen Neustartversuchen liegen mindestens 15 Minuten, auch nach Fehlern oder manuellen Aufrufen. Kein Tageslimit.
+- Fünf Minuten Schonzeit beim ersten Check bzw. neuem WindowServer; nach Messpausen über 22,5 Minuten oder rückwärts springender Uhr zwei Minuten. Ein während der Schonzeit übersprungener Check wird beim nächsten regulären Intervall wiederholt.
+- Der Helper muss mindestens eine Minute laufen. DisplayLink Manager muss im eigenen aktiven Benutzerkonto laufen und ein externer Bildschirm aktiv sein.
 - Der Helper-PID wird aus dem fest vorgegebenen Systemdienst ermittelt und gegen UID 0 und den erwarteten Programmpfad geprüft; unmittelbar vor dem Neustart erneut.
 - Der Versuch wird vor `kickstart` gespeichert. Nach einem Abbruch wird kein unmittelbarer weiterer Neustart ausgelöst.
 - Bis zu 90 Sekunden Kontrolle: neuer Helper-PID, vorherige aktive Bildschirmmodi und gesunkener Speicherverbrauch. Vorher-/Nachher-Werte werden protokolliert. Fehlende Bestätigungen ergeben `restart_verification_incomplete`, ohne weiteren Neustart.
@@ -52,17 +52,17 @@ sudo rm "/private/etc/sudoers.d/displaylink-guard-$(id -u)"
 
 ## Konfiguration
 
-`~/Library/Application Support/DisplayLinkGuard/settings.json` wird bei jeder Prüfung gelesen. Alle Felder müssen vorhanden sein. Änderungen erfordern keine Neuinstallation.
+`~/Library/Application Support/DisplayLinkGuard/settings.json` wird bei jeder Prüfung gelesen. Alle Felder müssen vorhanden sein. Änderungen erfordern keine Neuinstallation. Vorhandene Einstellungen bleiben bei einem Update erhalten; für den 15-Minuten-Zyklus mit 750-MiB-Grenze `thresholdMemoryMiB` auf 750, `cooldownSeconds` auf 900 und `minimumHelperAgeSeconds` auf 60 setzen. Die kurze Mindestlaufzeit erlaubt einen erneuten Neustart beim nächsten Check, auch wenn der vorherige Start einige Sekunden gedauert hat.
 
 | Einstellung | Standard | Gültiger Bereich |
 | --- | ---: | ---: |
-| `thresholdMemoryMiB` | 2048 | 1–1048576 |
-| `cooldownSeconds` | 10800 | 10800–604800 |
+| `thresholdMemoryMiB` | 750 | 1–1048576 |
+| `cooldownSeconds` | 900 | 900–604800 |
 | `startupGraceSeconds` | 300 | 0–86400 |
 | `resumeGraceSeconds` | 120 | 0–3600 |
-| `minimumHelperAgeSeconds` | 900 | 0–86400 |
+| `minimumHelperAgeSeconds` | 60 | 0–86400 |
 
-Sehr niedrige Grenzwerte sind für Funktionstests vorgesehen. Der Prüfzyklus bleibt fest bei drei Stunden. Status in `state.json` im selben Verzeichnis; Logs in `~/Library/Logs/DisplayLinkGuard/events.log`, bei 1 MiB einmal rotiert. Keine Netzwerkverbindung oder Bildschirmaufzeichnung.
+Sehr niedrige Grenzwerte sind für Funktionstests vorgesehen. Der Prüfzyklus bleibt fest bei 15 Minuten. Status in `state.json` im selben Verzeichnis; Logs in `~/Library/Logs/DisplayLinkGuard/events.log`, bei 1 MiB einmal rotiert. Keine Netzwerkverbindung oder Bildschirmaufzeichnung.
 
 ## Entwicklung
 

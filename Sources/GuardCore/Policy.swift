@@ -1,17 +1,17 @@
 import Foundation
 
 public struct Settings: Codable, Sendable {
-    public var thresholdMemoryMiB = 2048
-    public var cooldownSeconds = 10_800
+    public var thresholdMemoryMiB = 750
+    public var cooldownSeconds = 900
     public var startupGraceSeconds = 300
     public var resumeGraceSeconds = 120
-    public var minimumHelperAgeSeconds = 900
+    public var minimumHelperAgeSeconds = 60
 
     public init() {}
 
     public func validate() throws {
         guard (1...1_048_576).contains(thresholdMemoryMiB),
-              (10_800...604_800).contains(cooldownSeconds),
+              (900...604_800).contains(cooldownSeconds),
               (0...86_400).contains(startupGraceSeconds),
               (0...3_600).contains(resumeGraceSeconds),
               (0...86_400).contains(minimumHelperAgeSeconds) else {
@@ -65,7 +65,7 @@ public enum Policy {
         if sessionChanged {
             state.graceUntil = sample.now.addingTimeInterval(TimeInterval(settings.startupGraceSeconds))
         } else if let previousCheck,
-                  sample.now.timeIntervalSince(previousCheck) > 16_200 || sample.now < previousCheck {
+                  sample.now.timeIntervalSince(previousCheck) > 1_350 || sample.now < previousCheck {
             // launchd does not wake the Mac; allow settling after sleep or clock changes.
             state.graceUntil = sample.now.addingTimeInterval(TimeInterval(settings.resumeGraceSeconds))
         }

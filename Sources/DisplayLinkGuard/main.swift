@@ -38,10 +38,10 @@ func requireSuccess(_ command: String, _ arguments: [String]) throws {
         let backup = url.appendingPathExtension("v1-backup")
         if !FileManager.default.fileExists(atPath: backup.path) { try data.write(to: backup, options: .atomic) }
         if legacySettings {
-            object = ["thresholdMemoryMiB": 2048, "cooldownSeconds": 10800,
+            object = ["thresholdMemoryMiB": 750, "cooldownSeconds": 900,
                       "startupGraceSeconds": object["startupGraceSeconds"] ?? 300,
                       "resumeGraceSeconds": object["resumeGraceSeconds"] ?? 120,
-                      "minimumHelperAgeSeconds": object["minimumDisplayLinkAgeSeconds"] ?? 900]
+                      "minimumHelperAgeSeconds": 60]
         } else {
             object["version"] = 2
             object.removeValue(forKey: "lastPorts")
@@ -73,7 +73,7 @@ func requireSuccess(_ command: String, _ arguments: [String]) throws {
         "Label": Paths.label,
         "ProgramArguments": [paths.executable.path, "check"],
         "RunAtLoad": true,
-        "StartInterval": 10800,
+        "StartInterval": 900,
         "LimitLoadToSessionType": "Aqua",
         "ProcessType": "Background",
         "LowPriorityIO": true,
@@ -84,7 +84,7 @@ func requireSuccess(_ command: String, _ arguments: [String]) throws {
     try requireSuccess("/bin/launchctl", ["enable", service])
     try requireSuccess("/bin/launchctl", ["bootstrap", "gui/\(getuid())", paths.launchAgent.path])
     try requireSuccess("/bin/launchctl", ["print", service])
-    try EventLog(directory: paths.logs).append("installed label=\(Paths.label) interval=10800s")
+    try EventLog(directory: paths.logs).append("installed label=\(Paths.label) interval=900s")
     print("Installed and active. Settings: \(paths.settings.path)")
 }
 

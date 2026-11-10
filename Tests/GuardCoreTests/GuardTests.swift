@@ -16,17 +16,26 @@ final class GuardTests: XCTestCase {
     }
     func testSingleHighMeasurementTriggersAndBoundaryIsIncluded() {
         var state = GuardState()
-        XCTAssertFalse(Policy.evaluate(sample(memory: 2_147_483_647), settings: settings(), state: &state).restart)
-        XCTAssertTrue(Policy.evaluate(sample(memory: 2_147_483_648), settings: settings(), state: &state).restart)
+        XCTAssertFalse(Policy.evaluate(sample(memory: 786_431_999), settings: settings(), state: &state).restart)
+        XCTAssertTrue(Policy.evaluate(sample(memory: 786_432_000), settings: settings(), state: &state).restart)
     }
-    func testThreeHourCooldownAndNoDailyLimit() {
+    func testFifteenMinuteCooldownAndNoDailyLimit() {
         var state = GuardState()
-        for index in 0..<16 {
-            let now = Double(index * 10800)
+        for index in 0..<100 {
+            let now = Double(index * 900)
             XCTAssertTrue(Policy.evaluate(sample(now), settings: settings(), state: &state).restart)
             state.recordAttempt(at: start.addingTimeInterval(now))
-            XCTAssertEqual(Policy.evaluate(sample(now + 10799), settings: settings(), state: &state).reason, "cooldown")
+            XCTAssertEqual(Policy.evaluate(sample(now + 899), settings: settings(), state: &state).reason, "cooldown")
         }
+    }
+    func testNextScheduledCheckCanRestartHelperDespiteStartupDelay() {
+        var state = GuardState()
+        _ = Policy.evaluate(sample(), settings: settings(), state: &state)
+        state.recordAttempt(at: start)
+        var next = sample(900)
+        next.helperPID = 201
+        next.helperAgeSeconds = 895
+        XCTAssertTrue(Policy.evaluate(next, settings: settings(), state: &state).restart)
     }
     func testFailedAndInterruptedAttemptsKeepCooldownAfterSerialization() throws {
         var state = GuardState()
@@ -45,7 +54,7 @@ final class GuardTests: XCTestCase {
             if kind == 1 { observation.isConsoleUser = false }
             if kind == 2 { observation.externalDisplays = 0 }
             if kind == 3 { observation.displayLinkRunning = false }
-            if kind == 4 { observation.helperAgeSeconds = 60 }
+            if kind == 4 { observation.helperAgeSeconds = 30 }
             if kind == 5 { observation.memoryBytes = 0 }
             XCTAssertFalse(Policy.evaluate(observation, settings: settings(), state: &state).restart)
         }
@@ -53,7 +62,7 @@ final class GuardTests: XCTestCase {
     func testStartupResumeAndClockChangeGrace() {
         var state = GuardState()
         XCTAssertFalse(Policy.evaluate(sample(), settings: Settings(), state: &state).restart)
-        XCTAssertTrue(Policy.evaluate(sample(10800), settings: Settings(), state: &state).restart)
+        XCTAssertTrue(Policy.evaluate(sample(900), settings: Settings(), state: &state).restart)
         XCTAssertFalse(Policy.evaluate(sample(40000), settings: Settings(), state: &state).restart)
         XCTAssertFalse(Policy.evaluate(sample(39000), settings: Settings(), state: &state).restart)
     }
