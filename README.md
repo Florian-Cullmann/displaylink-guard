@@ -1,56 +1,68 @@
 # DisplayLink Guard
 
-Ein kleines natives macOS-Hilfsprogramm, das die Mach-Ports von WindowServer überwacht und bei dauerhaft hohen Werten DisplayLink Manager neu startet. Es braucht keine Administratorrechte, kein Python und kein Dock- oder Menüleistensymbol.
+Ein natives macOS-Hilfsprogramm gegen den Speicheranstieg des privilegierten DisplayLink-Helfers. Ein Benutzer-LaunchAgent misst **alle drei Stunden** dessen Speicher-Footprint (`top` → `MEM`, einschließlich komprimiertem Speicher). Ab **2048 MiB (2 GiB)** genügt eine Messung für einen Neustart. Es gibt **kein Tageslimit**.
 
-Ein Benutzer-LaunchAgent prüft alle 60 Sekunden und startet auch nach der nächsten Anmeldung wieder. Zwischen den Prüfungen läuft kein eigener Prozess. Der Mac wird dafür nicht aus dem Ruhezustand geweckt.
+Neugestartet wird ausschließlich der Systemdienst `system/com.displaylink.DisplayLinkManager.PrivilegedHelper` mit `launchctl kickstart -k`. WindowServer und DisplayLinkUserAgent werden nicht beendet. Der Monitor kann beim Neustart kurz schwarz werden; Fenster können sich verschieben. Der zugrunde liegende DisplayLink-Fehler wird damit nicht behoben.
 
-## Installation
+Hintergrund: [DisplayLink-Forum, Supportbestätigung vom 20.10.2026 und Helper-Workaround](https://www.displaylink.org/forum/printthread.php?t=69953).
 
-Voraussetzungen: macOS 13 oder neuer, Xcode Command Line Tools und DisplayLink Manager unter `/Applications/DisplayLink Manager.app`.
+## Installation und Aktualisierung
+
+Voraussetzungen: macOS 13 oder neuer, Xcode Command Line Tools, DisplayLink Manager unter `/Applications/DisplayLink Manager.app` und ein laufender privilegierter DisplayLink-Hilfsdienst.
 
 ```sh
 bash scripts/install.sh
 ```
 
-Der Installer baut das native Programm, installiert es nach `~/Library/Application Support/DisplayLinkGuard/` und aktiviert `~/Library/LaunchAgents/de.fcullmann.displaylink-guard.plist`. Keine Dateien müssen im Projektordner bleiben, damit der installierte Dienst funktioniert.
+Im normalen aktiven Benutzerkonto ausführen. Der Installer baut das Programm und fragt einmal nach dem Administratorpasswort. Er installiert eine mit `visudo` geprüfte, root-eigene sudoers-Regel für **genau diesen Benutzer und genau diesen Befehl**:
+
+```sh
+/bin/launchctl kickstart -k system/com.displaylink.DisplayLinkManager.PrivilegedHelper
+```
+
+Es werden keine beliebigen Befehle oder benutzerveränderbaren Programme zur Ausführung als root freigegeben. Das Tool selbst bleibt ein Benutzerprozess. Automatische Neustarts verwenden `sudo -n` und können keine Passwortabfrage auslösen.
+
+Das Programm wird nach `~/Library/Application Support/DisplayLinkGuard/` kopiert und der LaunchAgent `~/Library/LaunchAgents/de.fcullmann.displaylink-guard.plist` ersetzt. Bestehende Port-Konfigurationen werden bei `install` migriert und als `*.v1-backup` gesichert. Der alte Grenzwert und das Tageslimit entfallen; ein gespeicherter letzter Neustartversuch bleibt erhalten. Alte Konfigurationen werden erst bei der Installation umgestellt.
 
 ## Verhalten
 
-- Neustart ab **45.000 Mach-Ports**, bestätigt durch **drei Messungen** im Minutenabstand.
-- Mindestens **sechs Stunden Abstand** zwischen Versuchen und höchstens **drei Versuche in 24 Stunden**. Auch fehlgeschlagene Versuche zählen, damit keine Wiederholungsschleife entsteht.
-- Fünf Minuten Schonzeit nach dem ersten Start bzw. einem neuen WindowServer; nach längeren Messpausen zwei Minuten. Die Bestätigung beginnt danach neu.
-- DisplayLink muss mindestens 15 Minuten laufen. Manuell beendetes DisplayLink bleibt geschlossen.
-- Falls das Hilfsprogramm während eines eigenen Neustarts zwischen Beenden und Öffnen abbricht, versucht die nächste Prüfung innerhalb von fünf Minuten einmalig, DisplayLink wieder zu öffnen. Diese Ausnahme gilt nur für einen protokollierten, begonnenen Neustart in derselben Sitzung.
-- Neustarts erfolgen nur für die eigene aktive macOS-Anmeldung und bei einem externen Bildschirm.
-- Nur der vorher erneut überprüfte DisplayLink-Prozess des eigenen Benutzers erhält SIGTERM. WindowServer wird nicht beendet und DisplayLink nicht zwangsweise abgeschossen.
-- Nach dem Start wartet der Dienst bis zu 90 Sekunden auf die vorherigen aktiven Bildschirme mit denselben Auflösungen und Bildraten. Abweichungen werden protokolliert; Auflösungen werden nicht geändert.
-- Während der Wiederverbindung verarbeitet der Dienst macOS-Bildschirmmeldungen. Vorübergehend ungültige Bildschirm-Einträge werden innerhalb dieser Wartezeit erneut geprüft und brechen die Erfolgskontrolle nicht sofort ab.
+- Prüfung beim Laden des LaunchAgents und danach alle 10800 Sekunden. Der Mac wird nicht geweckt; Schlaf kann Prüfungen verzögern.
+- Ein Messwert ab dem Grenzwert genügt. Zwischen Neustartversuchen liegen mindestens drei Stunden, auch nach Fehlern oder manuellen Aufrufen. Kein Tageslimit.
+- Fünf Minuten Schonzeit beim ersten Check bzw. neuem WindowServer; nach Messpausen über 4,5 Stunden oder rückwärts springender Uhr zwei Minuten. Ein während der Schonzeit übersprungener Check wird beim nächsten regulären Intervall wiederholt.
+- Der Helper muss mindestens 15 Minuten laufen. DisplayLink Manager muss im eigenen aktiven Benutzerkonto laufen und ein externer Bildschirm aktiv sein.
+- Der Helper-PID wird aus dem fest vorgegebenen Systemdienst ermittelt und gegen UID 0 und den erwarteten Programmpfad geprüft; unmittelbar vor dem Neustart erneut.
+- Der Versuch wird vor `kickstart` gespeichert. Nach einem Abbruch wird kein unmittelbarer weiterer Neustart ausgelöst.
+- Bis zu 90 Sekunden Kontrolle: neuer Helper-PID, vorherige aktive Bildschirmmodi und gesunkener Speicherverbrauch. Vorher-/Nachher-Werte werden protokolliert. Fehlende Bestätigungen ergeben `restart_verification_incomplete`, ohne weiteren Neustart.
+- Messfehler, fehlende Rechte oder beschädigte Konfigurationen werden protokolliert. Fehlende Messwerte lösen keinen Neustart aus.
 
-Der angeschlossene DisplayLink-Monitor wird beim Neustart vorübergehend schwarz und Fenster können sich verschieben. Die Wiederverbindung kann mehrere zehn Sekunden dauern. Die Zahl der Mach-Ports ist ein Indikator, kein Beweis für die Ursache eines Rucklers. Hohe Werte können nach einem Neustart bestehen bleiben; deshalb sind die Begrenzungen nötig. Dies ist ein Workaround für einen reproduzierbar durch DisplayLink-Neustart gebesserten Zustand.
-
-## Status, Konfiguration und Entfernen
+## Bedienung
 
 ```sh
 "$HOME/Library/Application Support/DisplayLinkGuard/displaylink-guard" status
 "$HOME/Library/Application Support/DisplayLinkGuard/displaylink-guard" check --dry-run
+"$HOME/Library/Application Support/DisplayLinkGuard/displaylink-guard" check
 "$HOME/Library/Application Support/DisplayLinkGuard/displaylink-guard" uninstall
 ```
 
-`check --dry-run` misst und zeigt die Entscheidung, schreibt keinen Zustand und startet nichts neu. `uninstall` beendet die Überwachung und entfernt den Autostart; Konfiguration und Protokoll bleiben erhalten.
+`check --dry-run` misst ohne Zustandsänderung oder Neustart. `check` durchläuft die normale Entscheidung einschließlich Grenzwert und Sperrzeit. `uninstall` entfernt den Autostart; Konfiguration und Logs bleiben. Die separat installierte Neustartberechtigung entfernen:
 
-Die Datei `~/Library/Application Support/DisplayLinkGuard/settings.json` wird bei jeder Prüfung neu gelesen. Änderungen brauchen keine Neuinstallation. Alle Felder müssen vorhanden sein; ungültige oder beschädigte Konfiguration bzw. Zustandsdaten verhindern einen Neustart.
+```sh
+sudo rm "/private/etc/sudoers.d/displaylink-guard-$(id -u)"
+```
+
+## Konfiguration
+
+`~/Library/Application Support/DisplayLinkGuard/settings.json` wird bei jeder Prüfung gelesen. Alle Felder müssen vorhanden sein. Änderungen erfordern keine Neuinstallation.
 
 | Einstellung | Standard | Gültiger Bereich |
 | --- | ---: | ---: |
-| `thresholdPorts` | 45000 | 1000–10000000 |
-| `consecutiveSamples` | 3 | 2–20 |
-| `cooldownSeconds` | 21600 | 900–604800 |
-| `maximumRestartsPerDay` | 3 | 1–12 |
+| `thresholdMemoryMiB` | 2048 | 1–1048576 |
+| `cooldownSeconds` | 10800 | 10800–604800 |
 | `startupGraceSeconds` | 300 | 0–86400 |
 | `resumeGraceSeconds` | 120 | 0–3600 |
-| `minimumDisplayLinkAgeSeconds` | 900 | 0–86400 |
+| `minimumHelperAgeSeconds` | 900 | 0–86400 |
 
-Der Zustand liegt in `state.json` im selben Verzeichnis. Das Ereignisprotokoll liegt unter `~/Library/Logs/DisplayLinkGuard/events.log` und wird bei 1 MiB einmal rotiert. Protokolliert werden Messwerte, Entscheidungen und Neustartergebnisse; es gibt keine Netzwerkverbindung und keine Aufzeichnung von Bildschirminhalten.
+Sehr niedrige Grenzwerte sind für Funktionstests vorgesehen. Der Prüfzyklus bleibt fest bei drei Stunden. Status in `state.json` im selben Verzeichnis; Logs in `~/Library/Logs/DisplayLinkGuard/events.log`, bei 1 MiB einmal rotiert. Keine Netzwerkverbindung oder Bildschirmaufzeichnung.
 
 ## Entwicklung
 
@@ -60,4 +72,4 @@ swift build --configuration release
 .build/release/displaylink-guard check --dry-run
 ```
 
-Die Prüfungen verwenden das mit macOS gelieferte `ps` und `top`. Externe Befehle bekommen einzelne Argumente statt Shell-Text, eine feste Umgebung und ein Zeitlimit. Gleichzeitige Prüfungen werden über eine Dateisperre ausgeschlossen. Ein anstehender Neustart wird vor dem ersten Signal dauerhaft gespeichert; auch ein Abbruch des Hilfsprogramms hebt die Sperrzeit nicht auf.
+Tests prüfen Entscheidungen, Sperrzeiten, PID-/UID-Prüfung, Speicherparsing und Neustartkontrolle mit simuliertem Systemzugriff. Sie lösen keinen echten Neustart aus. Ein Live-Test erfolgt ausschließlich über `check`; nötigenfalls vorher den Grenzwert vorübergehend senken und danach wiederherstellen.

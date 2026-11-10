@@ -68,16 +68,35 @@ public enum Parsing {
         }
     }
 
-    public static func ports(_ output: String, pid: Int32) throws -> Int {
+    public static func memoryBytes(_ output: String, pid: Int32) throws -> Int {
         for line in output.split(separator: "\n") {
             let fields = line.split(whereSeparator: { $0.isWhitespace })
-            if fields.count == 2, Int32(fields[0]) == pid,
-               let count = Int(fields[1].trimmingCharacters(in: CharacterSet(charactersIn: "+-"))), count > 0 {
-                return count
+            guard fields.count == 2, Int32(fields[0]) == pid else { continue }
+            var value = String(fields[1])
+            if value.last == "+" || value.last == "-" { value.removeLast() }
+            let units: [Character: Double] = ["B": 1, "K": 1024, "M": 1_048_576, "G": 1_073_741_824, "T": 1_099_511_627_776]
+            let multiplier = value.last.flatMap { units[$0] }
+            let number = multiplier == nil ? value : String(value.dropLast())
+            if let amount = Double(number), amount.isFinite, amount > 0 {
+                let bytes = amount * (multiplier ?? 1)
+                if bytes < Double(Int.max) { return Int(bytes) }
             }
         }
-        throw GuardError.message("No valid Mach-port measurement for WindowServer PID \(pid)")
+        throw GuardError.message("No valid helper memory measurement for PID \(pid)")
     }
+
+    public static func servicePID(_ output: String) throws -> Int32 {
+        let pids = output.split(separator: "\n").compactMap { line -> Int32? in
+            let fields = line.split(whereSeparator: { $0.isWhitespace })
+            guard fields.count == 3, fields[0] == "pid", fields[1] == "=" else { return nil }
+            return Int32(fields[2])
+        }
+        guard pids.count == 1, let pid = pids.first, pid > 1 else {
+            throw GuardError.message("Helper service has no unambiguous running PID")
+        }
+        return pid
+    }
+
 }
 
 public struct DisplayMode: Codable, Hashable {
@@ -92,6 +111,9 @@ public struct DisplayMode: Codable, Hashable {
 }
 
 public enum MacSystem {
+    public static let helperService = "system/com.displaylink.DisplayLinkManager.PrivilegedHelper"
+    public static let helperRelativeExecutable = "Contents/MacOS/DisplayLinkPrivilegedHelper.app/Contents/MacOS/DisplayLinkPrivilegedHelper"
+    public static let restartArguments = ["-n", "/bin/launchctl", "kickstart", "-k", helperService]
     public static let displayLinkApp = "/Applications/DisplayLink Manager.app"
     public static let displayLinkExecutable = displayLinkApp + "/Contents/MacOS/DisplayLinkUserAgent"
     public static let windowServerExecutable = "/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer"
@@ -138,25 +160,36 @@ public enum MacSystem {
         }
         let agents = entries.filter { $0.uid == getuid() && $0.executable == displayLinkExecutable }
         guard agents.count <= 1 else { throw GuardError.message("Multiple DisplayLink agents; skipping restart") }
-        let result = try Commands.run("/usr/bin/top", ["-l", "1", "-R", "-pid", String(server.pid), "-stats", "pid,ports"])
-        guard result.status == 0 else { throw GuardError.message("top failed; skipping restart") }
+        let helper = try helperProcess()
+        let memory = try memoryBytes(pid: helper.pid)
         return Observation(now: Date(), bootTime: try bootTime(), windowServerPID: server.pid,
-                           ports: try Parsing.ports(result.output, pid: server.pid),
-                           displayLinkPID: agents.first?.pid, displayLinkAgeSeconds: agents.first?.ageSeconds ?? 0,
-                           isConsoleUser: isConsoleUser(), externalDisplays: try displays().filter { !$0.builtIn }.count)
+                           memoryBytes: memory, helperPID: helper.pid, helperAgeSeconds: helper.ageSeconds,
+                           isConsoleUser: isConsoleUser(), externalDisplays: try displays().filter { !$0.builtIn }.count,
+                           displayLinkRunning: !agents.isEmpty)
     }
 
-    public static func isRestartTarget(_ entry: ProcessEntry, expectedPID: Int32, uid: UInt32) -> Bool {
-        entry.pid == expectedPID && entry.pid > 1 && entry.uid == uid && entry.executable == displayLinkExecutable
+    public static func helperProcess() throws -> ProcessEntry {
+        let result = try Commands.run("/bin/launchctl", ["print", helperService])
+        guard result.status == 0 else { throw GuardError.message("DisplayLink helper service unavailable") }
+        let pid = try Parsing.servicePID(result.output)
+        guard let process = try processes().first(where: { isRestartTarget($0, expectedPID: pid) }) else {
+            throw GuardError.message("Helper service process identity mismatch")
+        }
+        return process
     }
 
-    /// Does not kill WindowServer, use sudo, force-kill DisplayLink, or change display modes.
-    public static func restartDisplayLink(pid: Int32) throws -> String {
-        try RestartEngine.run(pid: pid, runtime: NativeRestartRuntime())
+    public static func memoryBytes(pid: Int32) throws -> Int {
+        let result = try Commands.run("/usr/bin/top", ["-l", "1", "-R", "-pid", String(pid), "-stats", "pid,mem"])
+        guard result.status == 0 else { throw GuardError.message("top failed; skipping restart") }
+        return try Parsing.memoryBytes(result.output, pid: pid)
     }
 
-    public static func reopenDisplayLink() throws {
-        let launched = try Commands.run("/usr/bin/open", ["-g", "-a", displayLinkApp], timeout: 15)
-        guard launched.status == 0 else { throw GuardError.message("Cannot reopen DisplayLink: \(launched.output)") }
+    public static func isRestartTarget(_ entry: ProcessEntry, expectedPID: Int32) -> Bool {
+        entry.pid == expectedPID && entry.pid > 1 && entry.uid == 0 &&
+        (entry.executable == helperRelativeExecutable || entry.executable == displayLinkApp + "/" + helperRelativeExecutable)
+    }
+
+    public static func restartHelper(pid: Int32, beforeMemory: Int) throws -> String {
+        try RestartEngine.run(pid: pid, beforeMemory: beforeMemory, runtime: NativeRestartRuntime())
     }
 }

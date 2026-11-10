@@ -4,12 +4,11 @@ import Foundation
 
 public protocol RestartRuntime {
     var now: Date { get }
-    var uid: UInt32 { get }
     func isConsoleUser() -> Bool
-    func processes() throws -> [ProcessEntry]
+    func helper() throws -> ProcessEntry
     func displays() throws -> [DisplayMode]
-    func terminate(_ pid: Int32) throws
-    func launch() throws
+    func kickstart() throws
+    func memoryBytes(pid: Int32) throws -> Int
     func pause(_ seconds: Double)
 }
 
@@ -26,14 +25,16 @@ final class NativeRestartRuntime: RestartRuntime {
     deinit { CGDisplayRemoveReconfigurationCallback(displayCallback, nil) }
 
     var now: Date { Date() }
-    var uid: UInt32 { getuid() }
     func isConsoleUser() -> Bool { MacSystem.isConsoleUser() }
-    func processes() throws -> [ProcessEntry] { try MacSystem.processes() }
+    func helper() throws -> ProcessEntry { try MacSystem.helperProcess() }
     func displays() throws -> [DisplayMode] { try MacSystem.displays() }
-    func terminate(_ pid: Int32) throws {
-        guard Darwin.kill(pid, SIGTERM) == 0 else { throw GuardError.message("Cannot terminate DisplayLink: \(errno)") }
+    func memoryBytes(pid: Int32) throws -> Int { try MacSystem.memoryBytes(pid: pid) }
+    func kickstart() throws {
+        let result = try Commands.run("/usr/bin/sudo", MacSystem.restartArguments, timeout: 30)
+        guard result.status == 0 else {
+            throw GuardError.message("Helper restart failed (install the restricted sudo permission): \(result.output)")
+        }
     }
-    func launch() throws { try MacSystem.reopenDisplayLink() }
     func pause(_ seconds: Double) {
         // CoreGraphics delivers display changes through the event-processing thread.
         // Sleeping here can leave its display list holding the removed DisplayLink ID.
@@ -49,41 +50,30 @@ final class NativeRestartRuntime: RestartRuntime {
 }
 
 public enum RestartEngine {
-    public static func run(pid: Int32, runtime: any RestartRuntime) throws -> String {
+    public static func run(pid: Int32, beforeMemory: Int, runtime: any RestartRuntime) throws -> String {
         guard runtime.isConsoleUser() else { throw GuardError.message("Console user changed; restart cancelled") }
-        guard let target = try runtime.processes().first(where: {
-            MacSystem.isRestartTarget($0, expectedPID: pid, uid: runtime.uid)
-        }) else { throw GuardError.message("DisplayLink identity changed; restart cancelled") }
+        guard MacSystem.isRestartTarget(try runtime.helper(), expectedPID: pid) else {
+            throw GuardError.message("Helper identity changed; restart cancelled")
+        }
         let before = try runtime.displays()
-        try runtime.terminate(target.pid)
-
-        var waitError: Error?
-        do {
-            let deadline = runtime.now.addingTimeInterval(10)
-            while try runtime.processes().contains(where: {
-                MacSystem.isRestartTarget($0, expectedPID: target.pid, uid: runtime.uid)
-            }) {
-                if runtime.now >= deadline { throw GuardError.message("DisplayLink did not quit within 10 seconds") }
-                runtime.pause(0.25)
-            }
-        } catch { waitError = error }
-        // Always attempt to reopen after a successful signal, even if process enumeration fails.
-        try runtime.launch()
-        if let waitError { throw waitError }
-
+        try runtime.kickstart()
         let expected = Dictionary(before.map { ($0, 1) }, uniquingKeysWith: +)
         let deadline = runtime.now.addingTimeInterval(90)
+        var afterMemory: Int?
+        var restored = false
         repeat {
             do {
-                let agents = try runtime.processes().filter { $0.uid == runtime.uid && $0.executable == MacSystem.displayLinkExecutable }
-                let actual = Dictionary(try runtime.displays().map { ($0, 1) }, uniquingKeysWith: +)
-                if !agents.isEmpty && actual == expected { return "restarted_displays_restored" }
-            } catch {
-                // An invalid/removed display ID is normal while the virtual screen reconnects.
-                // Keep observing until the existing deadline instead of reporting an immediate failure.
-            }
+                let helper = try runtime.helper()
+                if helper.pid != pid && MacSystem.isRestartTarget(helper, expectedPID: helper.pid) {
+                    afterMemory = try runtime.memoryBytes(pid: helper.pid)
+                    restored = Dictionary(try runtime.displays().map { ($0, 1) }, uniquingKeysWith: +) == expected
+                    if restored, let afterMemory, afterMemory < beforeMemory {
+                        return "restarted_displays_restored memory_before_bytes=\(beforeMemory) memory_after_bytes=\(afterMemory)"
+                    }
+                }
+            } catch { /* Retry transient observations until the deadline. */ }
             runtime.pause(1)
         } while runtime.now < deadline
-        return "restarted_display_configuration_not_fully_restored"
+        return "restart_verification_incomplete displays_restored=\(restored) memory_before_bytes=\(beforeMemory) memory_after_bytes=\(afterMemory.map(String.init) ?? "unknown")"
     }
 }

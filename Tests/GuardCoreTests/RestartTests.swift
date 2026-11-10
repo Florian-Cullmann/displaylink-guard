@@ -4,130 +4,76 @@ import XCTest
 
 private final class FakeRuntime: RestartRuntime {
     var now = Date(timeIntervalSince1970: 1_800_000_000)
-    var uid: UInt32 = 501
     var consoleUser = true
-    var running = true
-    var signalled: [Int32] = []
-    var launchCount = 0
-    var failEnumerationAfterSignal = false
+    var pid: Int32 = 200
+    var executable = MacSystem.helperRelativeExecutable
+    var kickstarts = 0
+    var commandFails = false
+    var pidChanges = true
     var displayReturns = true
-    var transientDisplayErrorsAfterLaunch = 0
-    var transientProcessErrorsAfterLaunch = 0
-    var displayReadsAfterLaunch = 0
-    var processReadsAfterLaunch = 0
-    var executable = MacSystem.displayLinkExecutable
+    var memory = 70 * 1_048_576
+    var transientErrors = 0
     let mode = DisplayMode(vendor: 3524, model: 19874, width: 2560, height: 1440,
                            pixelWidth: 2560, pixelHeight: 1440, refreshTenths: 600, builtIn: false)
     func isConsoleUser() -> Bool { consoleUser }
-    func processes() throws -> [ProcessEntry] {
-        if failEnumerationAfterSignal && !signalled.isEmpty && launchCount == 0 {
-            throw GuardError.message("process enumeration failed")
+    func helper() throws -> ProcessEntry {
+        if kickstarts > 0 && transientErrors > 0 {
+            transientErrors -= 1
+            throw GuardError.message("temporarily unavailable")
         }
-        if launchCount > 0 {
-            processReadsAfterLaunch += 1
-            if processReadsAfterLaunch <= transientProcessErrorsAfterLaunch {
-                throw GuardError.message("process enumeration temporarily unavailable")
-            }
-        }
-        return running ? [ProcessEntry(pid: 200, uid: uid, ageSeconds: 1_000, executable: executable)] : []
+        return ProcessEntry(pid: pid, uid: 0, ageSeconds: 1000, executable: executable)
     }
-    func displays() throws -> [DisplayMode] {
-        if launchCount > 0 {
-            displayReadsAfterLaunch += 1
-            if displayReadsAfterLaunch <= transientDisplayErrorsAfterLaunch {
-                throw GuardError.message("Display is being reconfigured")
-            }
-        }
-        return signalled.isEmpty || displayReturns ? [mode] : []
+    func displays() throws -> [DisplayMode] { kickstarts == 0 || displayReturns ? [mode] : [] }
+    func memoryBytes(pid: Int32) throws -> Int { memory }
+    func kickstart() throws {
+        kickstarts += 1
+        if commandFails { throw GuardError.message("permission denied") }
+        if pidChanges { pid = 201 }
     }
-    func terminate(_ pid: Int32) throws { signalled.append(pid); running = false }
-    func launch() throws { launchCount += 1; running = true }
     func pause(_ seconds: Double) { now = now.addingTimeInterval(seconds) }
 }
 
 final class RestartTests: XCTestCase {
-    func testNormalRestartVerifiesDisplayRecovery() throws {
+    func testNormalRestartVerifiesNewPIDDisplaysAndMemoryReduction() throws {
         let system = FakeRuntime()
-        XCTAssertEqual(try RestartEngine.run(pid: 200, runtime: system), "restarted_displays_restored")
-        XCTAssertEqual(system.signalled, [200])
-        XCTAssertEqual(system.launchCount, 1)
+        let result = try RestartEngine.run(pid: 200, beforeMemory: 3_000_000_000, runtime: system)
+        XCTAssertTrue(result.hasPrefix("restarted_displays_restored"))
+        XCTAssertTrue(result.contains("memory_after_bytes=73400320"))
+        XCTAssertEqual(system.kickstarts, 1)
     }
-
-    func testRelaunchStillHappensWhenWaitingFails() {
+    func testVerificationFailuresAreBoundedAndNeverRepeatKickstart() throws {
+        for kind in 0..<3 {
+            let system = FakeRuntime()
+            let start = system.now
+            if kind == 0 { system.pidChanges = false }
+            if kind == 1 { system.displayReturns = false }
+            if kind == 2 { system.memory = 4_000_000_000 }
+            XCTAssertTrue(try RestartEngine.run(pid: 200, beforeMemory: 3_000_000_000, runtime: system).hasPrefix("restart_verification_incomplete"))
+            XCTAssertEqual(system.now.timeIntervalSince(start), 90)
+            XCTAssertEqual(system.kickstarts, 1)
+        }
+    }
+    func testTransientObservationsRecover() throws {
         let system = FakeRuntime()
-        system.failEnumerationAfterSignal = true
-        XCTAssertThrowsError(try RestartEngine.run(pid: 200, runtime: system))
-        XCTAssertEqual(system.signalled, [200])
-        XCTAssertEqual(system.launchCount, 1, "A failed observation must not leave the monitor disconnected")
+        system.transientErrors = 3
+        XCTAssertTrue(try RestartEngine.run(pid: 200, beforeMemory: 3_000_000_000, runtime: system).hasPrefix("restarted_displays_restored"))
+        XCTAssertEqual(system.kickstarts, 1)
     }
-
-    func testMissingDisplayReturnsBoundedWarningWithoutRepeatedRestarts() throws {
+    func testChangedIdentityOrConsoleUserPreventsRestart() {
+        for kind in 0..<3 {
+            let system = FakeRuntime()
+            if kind == 0 { system.pid = 201 }
+            if kind == 1 { system.executable = MacSystem.displayLinkExecutable }
+            if kind == 2 { system.consoleUser = false }
+            XCTAssertThrowsError(try RestartEngine.run(pid: 200, beforeMemory: 3_000_000_000, runtime: system))
+            XCTAssertEqual(system.kickstarts, 0)
+        }
+    }
+    func testPermissionFailureDoesNotRetry() {
         let system = FakeRuntime()
-        let started = system.now
-        system.displayReturns = false
-        XCTAssertEqual(try RestartEngine.run(pid: 200, runtime: system), "restarted_display_configuration_not_fully_restored")
-        XCTAssertEqual(system.now.timeIntervalSince(started), 90)
-        XCTAssertEqual(system.launchCount, 1)
-        XCTAssertEqual(system.signalled, [200])
-    }
-
-    func testTransientReconfigurationErrorsDoNotFailSuccessfulRestart() throws {
-        let system = FakeRuntime()
-        let started = system.now
-        system.transientDisplayErrorsAfterLaunch = 3
-        XCTAssertEqual(try RestartEngine.run(pid: 200, runtime: system), "restarted_displays_restored")
-        XCTAssertEqual(system.now.timeIntervalSince(started), 3)
-        XCTAssertEqual(system.launchCount, 1)
-        XCTAssertEqual(system.signalled, [200])
-    }
-
-    func testTransientProcessErrorsDuringRecoveryAreRetried() throws {
-        let system = FakeRuntime()
-        system.transientProcessErrorsAfterLaunch = 2
-        XCTAssertEqual(try RestartEngine.run(pid: 200, runtime: system), "restarted_displays_restored")
-        XCTAssertEqual(system.launchCount, 1)
-    }
-
-    func testPersistentReconfigurationErrorIsBoundedWithoutRestartLoop() throws {
-        let system = FakeRuntime()
-        let started = system.now
-        system.transientDisplayErrorsAfterLaunch = 1_000
-        XCTAssertEqual(try RestartEngine.run(pid: 200, runtime: system), "restarted_display_configuration_not_fully_restored")
-        XCTAssertEqual(system.now.timeIntervalSince(started), 90)
-        XCTAssertEqual(system.launchCount, 1)
-        XCTAssertEqual(system.signalled, [200])
-    }
-
-    func testReusedPIDAndAnotherConsoleUserCannotBeSignalled() {
-        let system = FakeRuntime()
-        system.executable = MacSystem.windowServerExecutable
-        XCTAssertThrowsError(try RestartEngine.run(pid: 200, runtime: system))
-        XCTAssertTrue(system.signalled.isEmpty)
-        XCTAssertEqual(system.launchCount, 0)
-        system.executable = MacSystem.displayLinkExecutable
-        system.consoleUser = false
-        XCTAssertThrowsError(try RestartEngine.run(pid: 200, runtime: system))
-        XCTAssertTrue(system.signalled.isEmpty)
-    }
-
-    func testInterruptedRestartMayOnlyReopenOnceWithinSameSession() {
-        let now = Date(timeIntervalSince1970: 1_800_000_000)
-        var state = GuardState()
-        state.bootTime = 100
-        state.windowServerPID = 413
-        state.recordAttempt(at: now)
-        let sample = Observation(now: now.addingTimeInterval(60), bootTime: 100, windowServerPID: 413,
-                                 ports: 50_000, displayLinkPID: nil, displayLinkAgeSeconds: 0,
-                                 isConsoleUser: true, externalDisplays: 2)
-        let decision = Policy.evaluate(sample, settings: Settings(), state: &state)
-        XCTAssertTrue(decision.reopenOnly)
-        XCTAssertFalse(decision.restart)
-        state.lastRestartResult = "recovering_interrupted_restart"
-        XCTAssertFalse(Policy.evaluate(sample, settings: Settings(), state: &state).reopenOnly)
-
-        state.lastRestartResult = "in_progress"
-        var newBoot = sample
-        newBoot.bootTime = 200
-        XCTAssertFalse(Policy.evaluate(newBoot, settings: Settings(), state: &state).reopenOnly)
+        system.commandFails = true
+        XCTAssertThrowsError(try RestartEngine.run(pid: 200, beforeMemory: 3_000_000_000, runtime: system))
+        XCTAssertEqual(system.kickstarts, 1)
+        XCTAssertEqual(MacSystem.restartArguments, ["-n", "/bin/launchctl", "kickstart", "-k", "system/com.displaylink.DisplayLinkManager.PrivilegedHelper"])
     }
 }

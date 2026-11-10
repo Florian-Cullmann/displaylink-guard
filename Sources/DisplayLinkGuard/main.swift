@@ -15,7 +15,7 @@ let paths = Paths()
     if FileManager.default.fileExists(atPath: paths.state.path) {
         // Malformed state must fail closed rather than discard a restart cooldown.
         let current = try JSONFile.read(GuardState.self, from: paths.state)
-        guard current.version == 1 else { throw GuardError.message("Unsupported state version; skipping restart") }
+        guard current.version == 2 else { throw GuardError.message("Unsupported state version; skipping restart") }
         return current
     }
     return GuardState()
@@ -26,26 +26,54 @@ func requireSuccess(_ command: String, _ arguments: [String]) throws {
     guard result.status == 0 else { throw GuardError.message("\(command) failed: \(result.output.trimmingCharacters(in: .whitespacesAndNewlines))") }
 }
 
+@MainActor func migrateLegacyFiles() throws {
+    for url in [paths.settings, paths.state] where FileManager.default.fileExists(atPath: url.path) {
+        let data = try Data(contentsOf: url)
+        guard var object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw GuardError.message("Invalid JSON object: \(url.path)")
+        }
+        let legacySettings = url == paths.settings && object["thresholdPorts"] != nil
+        let legacyState = url == paths.state && (object["version"] as? Int) == 1
+        guard legacySettings || legacyState else { continue }
+        let backup = url.appendingPathExtension("v1-backup")
+        if !FileManager.default.fileExists(atPath: backup.path) { try data.write(to: backup, options: .atomic) }
+        if legacySettings {
+            object = ["thresholdMemoryMiB": 2048, "cooldownSeconds": 10800,
+                      "startupGraceSeconds": object["startupGraceSeconds"] ?? 300,
+                      "resumeGraceSeconds": object["resumeGraceSeconds"] ?? 120,
+                      "minimumHelperAgeSeconds": object["minimumDisplayLinkAgeSeconds"] ?? 900]
+        } else {
+            object["version"] = 2
+            object.removeValue(forKey: "lastPorts")
+            object.removeValue(forKey: "displayLinkPID")
+            object["lastStatus"] = "migrated_from_port_monitor"
+        }
+        try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]).write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+}
+
 @MainActor func install() throws {
     guard getuid() != 0, MacSystem.isConsoleUser() else { throw GuardError.message("Install from your normal, active macOS login; do not use sudo") }
     try paths.prepare()
+    let service = "gui/\(getuid())/\(Paths.label)"
+    let existing = try Commands.run("/bin/launchctl", ["print", service])
+    if existing.status == 0 { try requireSuccess("/bin/launchctl", ["bootout", service]) }
     if !FileManager.default.fileExists(atPath: paths.settings.path) {
         try JSONFile.write(Settings(), to: paths.settings)
     }
+    try migrateLegacyFiles()
     _ = try settings()
     let source = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL.resolvingSymlinksInPath()
     if source != paths.executable {
         try Data(contentsOf: source).write(to: paths.executable, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: paths.executable.path)
     }
-    let service = "gui/\(getuid())/\(Paths.label)"
-    let existing = try Commands.run("/bin/launchctl", ["print", service])
-    if existing.status == 0 { try requireSuccess("/bin/launchctl", ["bootout", service]) }
     let plist: [String: Any] = [
         "Label": Paths.label,
         "ProgramArguments": [paths.executable.path, "check"],
         "RunAtLoad": true,
-        "StartInterval": 60,
+        "StartInterval": 10800,
         "LimitLoadToSessionType": "Aqua",
         "ProcessType": "Background",
         "LowPriorityIO": true,
@@ -56,7 +84,7 @@ func requireSuccess(_ command: String, _ arguments: [String]) throws {
     try requireSuccess("/bin/launchctl", ["enable", service])
     try requireSuccess("/bin/launchctl", ["bootstrap", "gui/\(getuid())", paths.launchAgent.path])
     try requireSuccess("/bin/launchctl", ["print", service])
-    try EventLog(directory: paths.logs).append("installed label=\(Paths.label) interval=60s")
+    try EventLog(directory: paths.logs).append("installed label=\(Paths.label) interval=10800s")
     print("Installed and active. Settings: \(paths.settings.path)")
 }
 
@@ -66,7 +94,7 @@ func requireSuccess(_ command: String, _ arguments: [String]) throws {
         try requireSuccess("/bin/launchctl", ["bootout", service])
     }
     if FileManager.default.fileExists(atPath: paths.launchAgent.path) { try FileManager.default.removeItem(at: paths.launchAgent) }
-    print("Autostart removed and monitoring stopped. Settings and logs were retained.")
+    print("Autostart removed. Settings and logs retained. Remove the restart permission with: sudo rm /private/etc/sudoers.d/displaylink-guard-\(getuid())")
 }
 
 @MainActor func check(dryRun: Bool) throws {
@@ -80,21 +108,15 @@ func requireSuccess(_ command: String, _ arguments: [String]) throws {
     let previousStatus = current.lastStatus
     let sample = try MacSystem.observe()
     let decision = Policy.evaluate(sample, settings: configuration, state: &current)
-    print("ports=\(sample.ports) threshold=\(configuration.thresholdPorts) confirmations=\(current.highSamples)/\(configuration.consecutiveSamples) reason=\(decision.reason) dry_run=\(dryRun)")
+    print("memory_bytes=\(sample.memoryBytes) threshold_mib=\(configuration.thresholdMemoryMiB) reason=\(decision.reason) dry_run=\(dryRun)")
     guard !dryRun else { return }
     let log = EventLog(directory: paths.logs)
-    if decision.reopenOnly {
-        current.lastRestartResult = "recovering_interrupted_restart"
-        try JSONFile.write(current, to: paths.state)
-        try MacSystem.reopenDisplayLink()
-        current.lastRestartResult = "interrupted_restart_relaunched"
-        try log.append(current.lastRestartResult!)
-    } else if decision.restart, let pid = sample.displayLinkPID {
+    if decision.restart, let pid = sample.helperPID {
         current.recordAttempt(at: sample.now)
         try JSONFile.write(current, to: paths.state)
-        try log.append("restart_requested ports=\(sample.ports) windowserver_pid=\(sample.windowServerPID) displaylink_pid=\(pid)")
+        try log.append("restart_requested memory_bytes=\(sample.memoryBytes) helper_pid=\(pid)")
         do {
-            current.lastRestartResult = try MacSystem.restartDisplayLink(pid: pid)
+            current.lastRestartResult = try MacSystem.restartHelper(pid: pid, beforeMemory: sample.memoryBytes)
             try log.append(current.lastRestartResult!)
         } catch {
             current.lastRestartResult = "restart_failed: \(error)"
@@ -102,7 +124,7 @@ func requireSuccess(_ command: String, _ arguments: [String]) throws {
             throw error
         }
     } else if previousStatus != decision.reason {
-        try log.append("status=\(decision.reason) ports=\(sample.ports)")
+        try log.append("status=\(decision.reason) memory_bytes=\(sample.memoryBytes)")
     }
     try JSONFile.write(current, to: paths.state)
 }
@@ -113,8 +135,7 @@ func requireSuccess(_ command: String, _ arguments: [String]) throws {
     let service = "gui/\(getuid())/\(Paths.label)"
     let loaded = try Commands.run("/bin/launchctl", ["print", service]).status == 0
     print("Autostart: \(loaded ? "active" : "not loaded")")
-    print("Last WindowServer port count: \(current.lastPorts.map(String.init) ?? "not measured") / \(configuration.thresholdPorts)")
-    print("Confirmations: \(current.highSamples) / \(configuration.consecutiveSamples)")
+    print("Last helper memory (bytes): \(current.lastMemoryBytes.map(String.init) ?? "not measured"); threshold: \(configuration.thresholdMemoryMiB) MiB")
     print("Last check: \(current.lastCheck.map { ISO8601DateFormatter().string(from: $0) } ?? "never")")
     print("Status: \(current.lastStatus)")
     print("Last restart result: \(current.lastRestartResult ?? "none")")
@@ -138,10 +159,9 @@ do {
     default: throw GuardError.message("Unknown command. Use --help.")
     }
 } catch {
-    // Invalid input or observation errors cannot carry confirmations into the next successful check.
+    // Record errors without discarding a persisted restart cooldown.
     if CommandLine.arguments.dropFirst().elementsEqual(["check"]),
        let lock = try? CheckLock(url: paths.lock), var current = try? state() {
-        current.clearConfirmation()
         current.lastStatus = "error: \(error)"
         try? JSONFile.write(current, to: paths.state)
         withExtendedLifetime(lock) {}
