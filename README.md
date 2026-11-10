@@ -21,7 +21,21 @@ Check the official release notes before installing. Once an update fixes the lea
 
 The CI builds and runs simulated tests on macOS 15 for Apple Silicon and Intel. CI does not have a DisplayLink dock and cannot verify actual display recovery.
 
-## Install
+## Desktop app
+
+A native setup app is available in the source tree. It includes the compiled guard, displays current memory use, and provides **Enable protection**, **Refresh** and **Remove protection** buttons. Users of the packaged app do not need Swift, Xcode, Python or Terminal. Closing its window does not stop the installed monitor.
+
+Public download packages must be Developer ID signed and notarized by Apple. **The first signed download is being prepared; development builds are not intended for general installation.** Until a signed release is published, use the source installation below.
+
+The packaged installation flow is:
+
+1. Open the downloaded DMG and drag **DisplayLink Guard** to **Applications**.
+2. Open the app and choose **Enable protection**.
+3. Approve the administrator prompt. The app checks every 15 minutes after setup.
+
+To uninstall, choose **Remove protection**, approve removal of the restart permission, then move the app to Trash. Settings and logs remain for inspection. Removing only the app does not uninstall the monitor.
+
+## Install from source
 
 ```sh
 git clone https://github.com/Florian-Cullmann/displaylink-guard.git
@@ -29,7 +43,7 @@ cd displaylink-guard
 bash scripts/install.sh
 ```
 
-Run the installer as your normal user, **not with `sudo`**. Review the scripts before running them. It builds from source, checks the helper and configuration, then asks for administrator authentication to install the restricted restart permission. No prebuilt or notarized app is distributed.
+Run the installer as your normal user, **not with `sudo`**. Review the scripts before running them. It builds from source, checks the helper and configuration, then asks for administrator authentication to install the restricted restart permission. The source installer builds locally; it does not download an executable.
 
 The program is copied to `~/Library/Application Support/DisplayLinkGuard/`. Its LaunchAgent is `~/Library/LaunchAgents/de.fcullmann.displaylink-guard.plist`. The checkout is not needed after installation.
 
@@ -128,7 +142,7 @@ rm -rf "$HOME/Library/Logs/DisplayLinkGuard"
 
 ## Development
 
-No external Swift packages are required.
+No external Swift packages are required. Packaging and signing instructions are in [docs/releasing.md](docs/releasing.md).
 
 ```sh
 swift test

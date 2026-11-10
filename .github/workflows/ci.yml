@@ -31,6 +31,7 @@ jobs:
         run: |
           bash -n scripts/install.sh
           sh -n scripts/permission.sh
+          bash -n scripts/build-app.sh
           python3 Tests/InstallerTests/test_install.py
       - name: Unit tests
         run: swift test
@@ -38,3 +39,6 @@ jobs:
         run: swift build --configuration release
       - name: CLI smoke test
         run: .build/release/displaylink-guard --help
+      - name: Build universal app package (development only)
+        if: matrix.runner == 'macos-15'
+        run: bash scripts/build-app.sh --development
