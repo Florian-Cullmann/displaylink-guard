@@ -1,75 +1,147 @@
 # DisplayLink Guard
 
-Ein natives macOS-Hilfsprogramm gegen den Speicheranstieg des privilegierten DisplayLink-Helfers. Ein Benutzer-LaunchAgent misst **alle 15 Minuten** dessen Speicher-Footprint (`top` → `MEM`, einschließlich komprimiertem Speicher). Ab **750 MiB** genügt eine Messung für einen Neustart. Es gibt **kein Tageslimit**.
+A small macOS utility that restarts `DisplayLinkPrivilegedHelper` when its memory footprint reaches **750 MiB**. It checks every **15 minutes**, using a per-user LaunchAgent. Nothing runs between checks.
 
-Neugestartet wird ausschließlich der Systemdienst `system/com.displaylink.DisplayLinkManager.PrivilegedHelper` mit `launchctl kickstart -k`. WindowServer und DisplayLinkUserAgent werden nicht beendet. Der Monitor kann beim Neustart kurz schwarz werden; Fenster können sich verschieben. Der zugrunde liegende DisplayLink-Fehler wird damit nicht behoben.
+This is a temporary workaround for growing helper memory usage, not a driver fix. It does not reboot the Mac, quit DisplayLink Manager, or terminate WindowServer. A helper restart can briefly interrupt DisplayLink displays or move windows, depending on the setup.
 
-Hintergrund: [DisplayLink-Forum, Supportbestätigung vom 20.10.2026 und Helper-Workaround](https://www.displaylink.org/forum/printthread.php?t=69953).
+## When to use it
 
-## Installation und Aktualisierung
+Use this if **DisplayLinkPrivilegedHelper** steadily consumes more memory on your Mac and restarting that helper releases it. This tool does not address leaks in `DisplayLinkUserAgent`, `CrashRestartHelper`, or other processes.
 
-Voraussetzungen: macOS 13 oder neuer, Xcode Command Line Tools, DisplayLink Manager unter `/Applications/DisplayLink Manager.app` und ein laufender privilegierter DisplayLink-Hilfsdienst.
+On October 20, 2026, [DisplayLink support acknowledged the reported issue](https://www.displaylink.org/forum/printthread.php?t=69953) and said a fix was expected in the next software update. **Last checked: November 10, 2026.** The [official download page](https://www.synaptics.com/products/displaylink-graphics/downloads/macos) still listed 17.0 as the latest release, and the thread did not confirm a shipped fix. This project is independent of Synaptics/DisplayLink.
+
+Check the official release notes before installing. Once an update fixes the leak on your Mac, uninstall the guard using the instructions below. There is no automatic driver-version check or update service.
+
+## Requirements
+
+- macOS 13 or later is the build target. **Live-tested on macOS 27.0.1, Apple Silicon, DisplayLink Manager 17.0.24.** Other macOS/DisplayLink combinations are not hardware-validated.
+- **Swift 6.0 or newer**, supplied by a recent Xcode or Xcode Command Line Tools installation. Check with `swift --version`. Older Command Line Tools are not sufficient.
+- DisplayLink Manager installed at `/Applications/DisplayLink Manager.app`, with its privileged helper running.
+- An active local login and administrator credentials for the one-time permission setup.
+
+The CI builds and runs simulated tests on macOS 15 for Apple Silicon and Intel. CI does not have a DisplayLink dock and cannot verify actual display recovery.
+
+## Install
 
 ```sh
+git clone https://github.com/Florian-Cullmann/displaylink-guard.git
+cd displaylink-guard
 bash scripts/install.sh
 ```
 
-Im normalen aktiven Benutzerkonto ausführen. Der Installer baut das Programm und fragt einmal nach dem Administratorpasswort. Er installiert eine mit `visudo` geprüfte, root-eigene sudoers-Regel für **genau diesen Benutzer und genau diesen Befehl**:
+Run the installer as your normal user, **not with `sudo`**. Review the scripts before running them. It builds from source, checks the helper and configuration, then asks for administrator authentication to install the restricted restart permission. No prebuilt or notarized app is distributed.
+
+The program is copied to `~/Library/Application Support/DisplayLinkGuard/`. Its LaunchAgent is `~/Library/LaunchAgents/de.fcullmann.displaylink-guard.plist`. The checkout is not needed after installation.
+
+For an update, run `git pull --ff-only` and `bash scripts/install.sh` from the checkout. Existing settings and the last restart attempt are retained. Legacy port-monitor settings are migrated with `*.v1-backup` copies. Handled installation failures restore the previous files and LaunchAgent state; a newly created restart permission is removed if installation fails. An abrupt power loss or forced process termination can still require manual recovery.
+
+## Permissions
+
+The monitor runs as your user. Only this exact command is permitted as root, without a password:
 
 ```sh
 /bin/launchctl kickstart -k system/com.displaylink.DisplayLinkManager.PrivilegedHelper
 ```
 
-Es werden keine beliebigen Befehle oder benutzerveränderbaren Programme zur Ausführung als root freigegeben. Das Tool selbst bleibt ein Benutzerprozess. Automatische Neustarts verwenden `sudo -n` und können keine Passwortabfrage auslösen.
+The installer writes a root-owned, mode-0440 rule to `/private/etc/sudoers.d/displaylink-guard-<uid>` and checks it with `visudo`. It does not grant root access to the guard executable, installation scripts, a shell, or other `launchctl` commands.
 
-Das Programm wird nach `~/Library/Application Support/DisplayLinkGuard/` kopiert und der LaunchAgent `~/Library/LaunchAgents/de.fcullmann.displaylink-guard.plist` ersetzt. Bestehende Port-Konfigurationen werden bei `install` migriert und als `*.v1-backup` gesichert. Der alte Grenzwert und das Tageslimit entfallen; ein gespeicherter letzter Neustartversuch bleibt erhalten. Alte Konfigurationen werden erst bei der Installation umgestellt.
+**Any process running as your user can use this permission to restart that helper.** The memory threshold and cooldown are enforced by the guard, not by sudo. Use this only on accounts where that limited permission is acceptable. An existing permission file with unexpected contents is left untouched and installation stops.
 
-## Verhalten
-
-- Prüfung beim Laden des LaunchAgents und danach alle 900 Sekunden. Der Mac wird nicht geweckt; Schlaf kann Prüfungen verzögern.
-- Ein Messwert ab dem Grenzwert genügt. Zwischen Neustartversuchen liegen mindestens 15 Minuten, auch nach Fehlern oder manuellen Aufrufen. Kein Tageslimit.
-- Fünf Minuten Schonzeit beim ersten Check bzw. neuem WindowServer; nach Messpausen über 22,5 Minuten oder rückwärts springender Uhr zwei Minuten. Ein während der Schonzeit übersprungener Check wird beim nächsten regulären Intervall wiederholt.
-- Der Helper muss mindestens eine Minute laufen. DisplayLink Manager muss im eigenen aktiven Benutzerkonto laufen und ein externer Bildschirm aktiv sein.
-- Der Helper-PID wird aus dem fest vorgegebenen Systemdienst ermittelt und gegen UID 0 und den erwarteten Programmpfad geprüft; unmittelbar vor dem Neustart erneut.
-- Der Versuch wird vor `kickstart` gespeichert. Nach einem Abbruch wird kein unmittelbarer weiterer Neustart ausgelöst.
-- Bis zu 90 Sekunden Kontrolle: neuer Helper-PID, vorherige aktive Bildschirmmodi und gesunkener Speicherverbrauch. Vorher-/Nachher-Werte werden protokolliert. Fehlende Bestätigungen ergeben `restart_verification_incomplete`, ohne weiteren Neustart.
-- Messfehler, fehlende Rechte oder beschädigte Konfigurationen werden protokolliert. Fehlende Messwerte lösen keinen Neustart aus.
-
-## Bedienung
+## Check status
 
 ```sh
-"$HOME/Library/Application Support/DisplayLinkGuard/displaylink-guard" status
-"$HOME/Library/Application Support/DisplayLinkGuard/displaylink-guard" check --dry-run
-"$HOME/Library/Application Support/DisplayLinkGuard/displaylink-guard" check
+GUARD="$HOME/Library/Application Support/DisplayLinkGuard/displaylink-guard"
+"$GUARD" status
+"$GUARD" check --dry-run
+```
+
+`status` shows the last saved observation. `check --dry-run` takes a fresh measurement and shows the decision without changing state or restarting anything. To run a normal check immediately, use `"$GUARD" check`; the same threshold and cooldown apply.
+
+State and settings are in the installation directory. Logs are at `~/Library/Logs/DisplayLinkGuard/events.log`, rotated once at 1 MiB. The guard makes no network requests and records no screen contents.
+
+## Restart policy
+
+- Check when the LaunchAgent loads, then every 900 seconds. Sleep delays checks; the guard does not wake the Mac.
+- Restart after one measurement at or above the configured threshold. Memory is read from `top`'s `MEM` field, including compressed memory, rather than RSS alone.
+- Wait at least 15 minutes between attempts, including failed attempts. There is no daily limit. A manual check or scheduling delay can cause the next scheduled check to fall inside this cooldown.
+- Allow five minutes after the first check or a new WindowServer, and two minutes after a measurement gap longer than 22.5 minutes or a backward clock change. A skipped check is retried at the next regular interval.
+- Require the helper to be at least one minute old, DisplayLink Manager to be running in the active user's session, and an external display to be active.
+- Resolve the helper PID from its fixed system service and check UID 0 and its executable path again before restarting.
+- Save the attempt before requesting a restart. Concurrent checks are locked out.
+- After restarting, check for a new helper PID, lower memory usage, and the previous active display modes for up to 90 seconds. Log the before/after values. Incomplete verification is reported without repeating the restart.
+
+750 MiB is a configurable policy choice, not an official DisplayLink recommendation or a universal leak detector.
+
+## Configuration
+
+Edit `~/Library/Application Support/DisplayLinkGuard/settings.json`. Changes are read on the next check; all fields are required.
+
+```json
+{
+  "thresholdMemoryMiB": 750,
+  "cooldownSeconds": 900,
+  "startupGraceSeconds": 300,
+  "resumeGraceSeconds": 120,
+  "minimumHelperAgeSeconds": 60
+}
+```
+
+| Setting | Allowed range | Unit |
+| --- | ---: | --- |
+| `thresholdMemoryMiB` | 1–1048576 | MiB |
+| `cooldownSeconds` | 900–604800 | seconds |
+| `startupGraceSeconds` | 0–86400 | seconds |
+| `resumeGraceSeconds` | 0–3600 | seconds |
+| `minimumHelperAgeSeconds` | 0–86400 | seconds |
+
+The check interval is fixed at 15 minutes. Very low thresholds are useful only for controlled testing. Upgrading preserves existing settings, including older 2-GiB thresholds and three-hour cooldowns; change them explicitly if desired.
+
+## Uninstall
+
+Stop the monitor and remove its LaunchAgent:
+
+```sh
 "$HOME/Library/Application Support/DisplayLinkGuard/displaylink-guard" uninstall
 ```
 
-`check --dry-run` misst ohne Zustandsänderung oder Neustart. `check` durchläuft die normale Entscheidung einschließlich Grenzwert und Sperrzeit. `uninstall` entfernt den Autostart; Konfiguration und Logs bleiben. Die separat installierte Neustartberechtigung entfernen:
+Remove the separate restart permission as well:
 
 ```sh
 sudo rm "/private/etc/sudoers.d/displaylink-guard-$(id -u)"
 ```
 
-## Konfiguration
+Settings, executable and logs remain for inspection. To remove them after uninstalling:
 
-`~/Library/Application Support/DisplayLinkGuard/settings.json` wird bei jeder Prüfung gelesen. Alle Felder müssen vorhanden sein. Änderungen erfordern keine Neuinstallation. Vorhandene Einstellungen bleiben bei einem Update erhalten; für den 15-Minuten-Zyklus mit 750-MiB-Grenze `thresholdMemoryMiB` auf 750, `cooldownSeconds` auf 900 und `minimumHelperAgeSeconds` auf 60 setzen. Die kurze Mindestlaufzeit erlaubt einen erneuten Neustart beim nächsten Check, auch wenn der vorherige Start einige Sekunden gedauert hat.
+```sh
+rm -rf "$HOME/Library/Application Support/DisplayLinkGuard"
+rm -rf "$HOME/Library/Logs/DisplayLinkGuard"
+```
 
-| Einstellung | Standard | Gültiger Bereich |
-| --- | ---: | ---: |
-| `thresholdMemoryMiB` | 750 | 1–1048576 |
-| `cooldownSeconds` | 900 | 900–604800 |
-| `startupGraceSeconds` | 300 | 0–86400 |
-| `resumeGraceSeconds` | 120 | 0–3600 |
-| `minimumHelperAgeSeconds` | 60 | 0–86400 |
+## Troubleshooting
 
-Sehr niedrige Grenzwerte sind für Funktionstests vorgesehen. Der Prüfzyklus bleibt fest bei 15 Minuten. Status in `state.json` im selben Verzeichnis; Logs in `~/Library/Logs/DisplayLinkGuard/events.log`, bei 1 MiB einmal rotiert. Keine Netzwerkverbindung oder Bildschirmaufzeichnung.
+- **Preflight cannot find the helper:** start DisplayLink Manager and check that its background service is enabled. The guard intentionally refuses unknown service layouts.
+- **Permission denied on restart:** rerun `bash scripts/install.sh` and inspect the reported sudoers error. Do not run the guard itself as root.
+- **Invalid settings/state:** correct the reported file. Installation validates it before stopping an existing monitor. Do not delete state just to bypass a cooldown.
+- **Installation lock after an interrupted install:** first confirm no installer is running, then remove the empty `~/Library/Application Support/DisplayLinkGuard/install.lock` directory with `rmdir` and rerun the installer.
+- **Rollback or permission cleanup failed:** follow the exact error, retain the log, and rerun installation after correcting the cause. A force-killed installer cannot run its cleanup handlers.
+- **`restart_verification_incomplete`:** the command ran, but the guard could not confirm all recovery conditions. Check the display and log before trying again.
 
-## Entwicklung
+## Development
+
+No external Swift packages are required.
 
 ```sh
 swift test
 swift build --configuration release
-.build/release/displaylink-guard check --dry-run
+bash -n scripts/install.sh
+sh -n scripts/permission.sh
+python3 Tests/InstallerTests/test_install.py
 ```
 
-Tests prüfen Entscheidungen, Sperrzeiten, PID-/UID-Prüfung, Speicherparsing und Neustartkontrolle mit simuliertem Systemzugriff. Sie lösen keinen echten Neustart aus. Ein Live-Test erfolgt ausschließlich über `check`; nötigenfalls vorher den Grenzwert vorübergehend senken und danach wiederherstellen.
+The Python 3 test harness is only needed for development. It tests installation failure paths using mocked commands. Swift tests cover policy, parsing, process identity, restart verification, migration and rollback. Neither test suite restarts DisplayLink or installs a service.
+
+For bug reports, include macOS and DisplayLink versions, processor architecture, the dry-run result and relevant log lines. Remove any information you do not want public. Do not upload full system diagnostics or credentials.
+
+## License
+
+[MIT](LICENSE).

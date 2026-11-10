@@ -26,48 +26,31 @@ func requireSuccess(_ command: String, _ arguments: [String]) throws {
     guard result.status == 0 else { throw GuardError.message("\(command) failed: \(result.output.trimmingCharacters(in: .whitespacesAndNewlines))") }
 }
 
-@MainActor func migrateLegacyFiles() throws {
-    for url in [paths.settings, paths.state] where FileManager.default.fileExists(atPath: url.path) {
-        let data = try Data(contentsOf: url)
-        guard var object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw GuardError.message("Invalid JSON object: \(url.path)")
-        }
-        let legacySettings = url == paths.settings && object["thresholdPorts"] != nil
-        let legacyState = url == paths.state && (object["version"] as? Int) == 1
-        guard legacySettings || legacyState else { continue }
-        let backup = url.appendingPathExtension("v1-backup")
-        if !FileManager.default.fileExists(atPath: backup.path) { try data.write(to: backup, options: .atomic) }
-        if legacySettings {
-            object = ["thresholdMemoryMiB": 750, "cooldownSeconds": 900,
-                      "startupGraceSeconds": object["startupGraceSeconds"] ?? 300,
-                      "resumeGraceSeconds": object["resumeGraceSeconds"] ?? 120,
-                      "minimumHelperAgeSeconds": 60]
-        } else {
-            object["version"] = 2
-            object.removeValue(forKey: "lastPorts")
-            object.removeValue(forKey: "displayLinkPID")
-            object["lastStatus"] = "migrated_from_port_monitor"
-        }
-        try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]).write(to: url, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-    }
+func optionalData(_ url: URL) throws -> Data? {
+    // Do not treat unreadable files as absent.
+    do { return try Data(contentsOf: url) }
+    catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError { return nil }
 }
 
-@MainActor func install() throws {
-    guard getuid() != 0, MacSystem.isConsoleUser() else { throw GuardError.message("Install from your normal, active macOS login; do not use sudo") }
-    try paths.prepare()
-    let service = "gui/\(getuid())/\(Paths.label)"
-    let existing = try Commands.run("/bin/launchctl", ["print", service])
-    if existing.status == 0 { try requireSuccess("/bin/launchctl", ["bootout", service]) }
-    if !FileManager.default.fileExists(atPath: paths.settings.path) {
-        try JSONFile.write(Settings(), to: paths.settings)
+@MainActor func installationChanges() throws -> [InstallationFile] {
+    guard getuid() != 0, MacSystem.isConsoleUser() else {
+        throw GuardError.message("Install from your normal, active macOS login; do not use sudo")
     }
-    try migrateLegacyFiles()
-    _ = try settings()
+    _ = try MacSystem.helperProcess()
     let source = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL.resolvingSymlinksInPath()
-    if source != paths.executable {
-        try Data(contentsOf: source).write(to: paths.executable, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: paths.executable.path)
+    var changes = [InstallationFile(url: paths.executable, data: try Data(contentsOf: source), permissions: 0o755)]
+    for url in [paths.settings, paths.state] {
+        let old = try optionalData(url)
+        if url == paths.settings {
+            changes.append(InstallationFile(url: url, data: try InstallationConfiguration.settings(old)))
+        } else if let old {
+            changes.append(InstallationFile(url: url, data: try InstallationConfiguration.state(old)))
+        }
+        if let old, let object = try JSONSerialization.jsonObject(with: old) as? [String: Any],
+           object["thresholdPorts"] != nil || (object["version"] as? Int) == 1 {
+            let backup = url.appendingPathExtension("v1-backup")
+            if try optionalData(backup) == nil { changes.append(InstallationFile(url: backup, data: old)) }
+        }
     }
     let plist: [String: Any] = [
         "Label": Paths.label,
@@ -78,13 +61,64 @@ func requireSuccess(_ command: String, _ arguments: [String]) throws {
         "ProcessType": "Background",
         "LowPriorityIO": true,
     ]
-    let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
-    try data.write(to: paths.launchAgent, options: .atomic)
-    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: paths.launchAgent.path)
-    try requireSuccess("/bin/launchctl", ["enable", service])
-    try requireSuccess("/bin/launchctl", ["bootstrap", "gui/\(getuid())", paths.launchAgent.path])
-    try requireSuccess("/bin/launchctl", ["print", service])
-    try EventLog(directory: paths.logs).append("installed label=\(Paths.label) interval=900s")
+    changes.append(InstallationFile(url: paths.launchAgent,
+        data: try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)))
+    return changes
+}
+
+final class NativeInstallation: InstallationRuntime {
+    let files: InstallationFiles
+    let service = "gui/\(getuid())/\(Paths.label)"
+    let domain = "gui/\(getuid())"
+    let plist: URL
+    let wasLoaded: Bool
+    let wasDisabled: Bool
+
+    init(files: InstallationFiles, plist: URL) throws {
+        self.files = files
+        self.plist = plist
+        wasLoaded = try Commands.run("/bin/launchctl", ["print", service]).status == 0
+        let disabled = try Commands.run("/bin/launchctl", ["print-disabled", domain])
+        guard disabled.status == 0 else { throw GuardError.message("Cannot read launchd configuration") }
+        wasDisabled = disabled.output.contains("\"\(Paths.label)\" => true")
+    }
+    func stop() throws {
+        if try Commands.run("/bin/launchctl", ["print", service]).status == 0 {
+            try requireSuccess("/bin/launchctl", ["bootout", service])
+        }
+    }
+    func apply() throws { try files.apply() }
+    func start() throws {
+        try requireSuccess("/bin/launchctl", ["enable", service])
+        try requireSuccess("/bin/launchctl", ["bootstrap", domain, plist.path])
+        try requireSuccess("/bin/launchctl", ["print", service])
+    }
+    func rollback() throws {
+        try stop()
+        try files.restore()
+        try requireSuccess("/bin/launchctl", [wasDisabled ? "disable" : "enable", service])
+        if wasLoaded { try requireSuccess("/bin/launchctl", ["bootstrap", domain, plist.path]) }
+    }
+}
+
+@MainActor func preflight() throws {
+    _ = try InstallationFiles(installationChanges())
+    print("Preflight passed: helper found; configuration and installation files are valid.")
+}
+
+@MainActor func install() throws {
+    // Validate before stopping an existing service or changing installation files.
+    _ = try installationChanges()
+    try paths.prepare()
+    guard let lock = try CheckLock(url: paths.lock) else {
+        throw GuardError.message("A check or installation is in progress; retry after it finishes")
+    }
+    defer { withExtendedLifetime(lock) {} }
+    let files = try InstallationFiles(installationChanges())
+    let runtime = try NativeInstallation(files: files, plist: paths.launchAgent)
+    try InstallationEngine.run(runtime)
+    // Logging failure must not roll back an otherwise successful installation.
+    try? EventLog(directory: paths.logs).append("installed label=\(Paths.label) interval=900s")
     print("Installed and active. Settings: \(paths.settings.path)")
 }
 
@@ -149,13 +183,14 @@ func requireSuccess(_ command: String, _ arguments: [String]) throws {
 do {
     let arguments = Array(CommandLine.arguments.dropFirst())
     switch arguments {
+    case ["preflight"]: try preflight()
     case ["install"]: try install()
     case ["uninstall"]: try uninstall()
     case ["check"]: try check(dryRun: false)
     case ["check", "--dry-run"]: try check(dryRun: true)
     case ["status"]: try status()
     case [], ["help"], ["--help"]:
-        print("displaylink-guard install | uninstall | status | check [--dry-run]")
+        print("displaylink-guard install | uninstall | status | check [--dry-run] | preflight")
     default: throw GuardError.message("Unknown command. Use --help.")
     }
 } catch {
