@@ -1,3 +1,5 @@
+NOTE: There is an official fix from DisplayLink for this issue now: [https://www.synaptics.com/products/d...ownloads/macos](https://www.displaylink.org/forum/showpost.php?p=99704&postcount=8)
+
 # DisplayLink Guard
 
 A small macOS utility that restarts `DisplayLinkPrivilegedHelper` when its memory footprint reaches **750 MiB**. It checks every **15 minutes**, using a per-user LaunchAgent. Nothing runs between checks.
